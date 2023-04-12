@@ -1,7 +1,7 @@
 use nalgebra as na;
 
 use na::{DVector, DMatrix};
-use crate::lm;
+use crate::{lm, problem::Problem};
 
 /// Produces a skew-symmetric or "cross-product matrix" from
 /// a 3-vector. This is needed for the `exp_map` and `log_map`
@@ -269,78 +269,17 @@ impl lm::LMProblem for Calibration<'_> {
 
 #[test]
 fn test_opt() {
-    // 11x11 pattern in a 1m x 1m square in the XY plane
-    let mut source_pts: Vec<na::Point3<f64>> = Vec::new();
-    for i in -5..6 {
-        for j in -5..6 {
-            source_pts.push(na::Point3::<f64>::new(i as f64 * 0.1, j as f64 * 0.1, 0.0));
-        }
-    }
+    let problem = crate::problem::load("problem.json").unwrap();
 
     // Ground truth camera model
     let camera_model = na::Vector4::<f64>::new(540.0, 540.0, 320.0, 240.0); // fx, fy, cx, cy
 
     // Ground truth camera-from-model transforms for three "images"
-    let transforms = vec![
-        na::Isometry3::<f64>::new(
-            na::Vector3::<f64>::new(-0.1, 0.1, 2.0),
-            na::Vector3::<f64>::new(-0.2, 0.2, 0.2),
-        ),
-        na::Isometry3::<f64>::new(
-            na::Vector3::<f64>::new(-0.1, -0.1, 2.0),
-            na::Vector3::<f64>::new(0.2, -0.2, 0.2),
-        ),
-        na::Isometry3::<f64>::new(
-            na::Vector3::<f64>::new(0.1, 0.1, 2.0),
-            na::Vector3::<f64>::new(-0.2, -0.2, -0.2),
-        ),
-        na::Isometry3::<f64>::new(
-            na::Vector3::<f64>::new(0.2, 0.1, 2.0),
-            na::Vector3::<f64>::new(-0.2, -0.2, -0.2),
-        ),
-        na::Isometry3::<f64>::new(
-            na::Vector3::<f64>::new(0.1, 0.2, 2.0),
-            na::Vector3::<f64>::new(-0.2, -0.2, -0.2),
-        ),
-        na::Isometry3::<f64>::new(
-            na::Vector3::<f64>::new(-0.2, 0.1, 2.0),
-            na::Vector3::<f64>::new(-0.2, -0.2, -0.2),
-        ),
-        na::Isometry3::<f64>::new(
-            na::Vector3::<f64>::new(0.1, -0.2, 2.0),
-            na::Vector3::<f64>::new(-0.2, -0.2, -0.2),
-        ),
-        na::Isometry3::<f64>::new(
-            na::Vector3::<f64>::new(2.0, 0.1, 2.0),
-            na::Vector3::<f64>::new(-0.1, -0.2, -0.2),
-        ),
-        na::Isometry3::<f64>::new(
-            na::Vector3::<f64>::new(0.15, 0.1, 2.0),
-            na::Vector3::<f64>::new(-0.2, 0.1, -0.2),
-        ),
-        na::Isometry3::<f64>::new(
-            na::Vector3::<f64>::new(0.16, 0.1, 2.0),
-            na::Vector3::<f64>::new(-0.2, 0.1, -0.2),
-        ),
-    ];
-
-    // Model coordinates are mapped into camera coordinates in three sets
-    // for three "images"
-    let transformed_pts = transforms
-        .iter()
-        .map(|t| source_pts.iter().map(|p| t * p).collect::<Vec<_>>())
-        .collect::<Vec<_>>();
-
-    // Projection function is applied producing three sets of pixel values
-    let imaged_pts = transformed_pts
-        .iter()
-        .map(|t_list| {
-            t_list
-                .iter()
-                .map(|t| project(&camera_model, t))
-                .collect::<Vec<na::Point2<f64>>>()
-        })
-        .collect::<Vec<_>>();
+    let transforms = problem.extrinsics;
+    let source_pts = problem.world_points.iter().map(|p| {
+        na::Point3::<f64>::new(p.x, p.y, 0.0)
+    }).collect::<Vec<_>>();
+    let imaged_pts = problem.image_points.into_iter().take(3).collect::<Vec<_>>();
 
     // Create calibration parameters
     let cal_cost = Calibration {
@@ -352,10 +291,10 @@ fn test_opt() {
     let mut init_param = na::DVector::<f64>::zeros(4 + imaged_pts.len() * 6);
 
     // Arbitrary guess for camera model
-    init_param[0] = 1000.0; // fx
-    init_param[1] = 1000.0; // fy
-    init_param[2] = 500.0; // cx
-    init_param[3] = 500.0; // cy
+    init_param[0] = 550.0; // fx
+    init_param[1] = 550.0; // fy
+    init_param[2] = 320.0; // cx
+    init_param[3] = 240.0; // cy
 
     // Arbitrary guess for poses (3m in front of the camera with no rotation)
     // We have to convert this to a 6D lie algebra element to populate the parameter
@@ -382,13 +321,12 @@ fn test_opt() {
             .fixed_view_mut::<6, 1>(4 + idx * 6, 0)
             .copy_from(&init_pose_lie);
     }
-    let max_iter = 100;
+    let max_iter = 300000;
     let tol = 1e-8;
     let lambda = 1e-3;
     let gamma = 10.0;
 
     let result = crate::lm::levenberg_marquardt(cal_cost, init_param, max_iter, tol, lambda, gamma);
-    let expected = DVector::from_vec(vec![1.0, 1.0, 1.0]);
     println!("{result}");
 
     // Print transforms
